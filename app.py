@@ -175,7 +175,7 @@ def gradio_analyze(image):
     return result_md, heatmap
 
 
-with gr.Blocks(title="DermAI — Detector de Psoriase", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="DermAI — Detector de Psoriase") as demo:
     gr.Markdown("# DermAI -- Detector de Psoriase")
     gr.Markdown(
         "> Uso pessoal. Nao substitui diagnostico medico. "
@@ -205,5 +205,9 @@ with gr.Blocks(title="DermAI — Detector de Psoriase", theme=gr.themes.Soft()) 
         "**Modelo:** EfficientNet-B0 — classifica psoriase vs outras lesoes de pele"
     )
 
+import os as _os
+
 if __name__ == "__main__":
-    demo.launch(mcp_server=True)
+    # On HF Spaces SPACE_ID is set; skip MCP there (port not exposed)
+    _on_spaces = bool(_os.environ.get("SPACE_ID"))
+    demo.launch(mcp_server=not _on_spaces)

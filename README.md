@@ -1,3 +1,15 @@
+---
+title: DermAI — Psoriasis Detector
+emoji: 🔬
+colorFrom: red
+colorTo: blue
+sdk: gradio
+sdk_version: "5.28.0"
+app_file: app.py
+pinned: false
+license: mit
+---
+
 # DermAI — Psoriasis Detector
 
 Personal skin lesion classifier. Upload a photo → detects whether psoriasis is likely present.
