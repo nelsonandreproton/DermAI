@@ -7,6 +7,8 @@ Binary classifier: psoriasis vs not_psoriasis.
 import json
 from pathlib import Path
 
+import threading
+import numpy as np
 import torch
 import torch.nn as nn
 from torchvision import transforms
@@ -56,6 +58,66 @@ try:
 except FileNotFoundError:
     _model, _class_names = None, []
     MODEL_READY = False
+
+
+_heatmap_lock = threading.Lock()
+
+
+def _generate_heatmap(image: Image.Image) -> Image.Image | None:
+    """Grad-CAM heatmap targeting the psoriasis class on features[-1]."""
+    if not MODEL_READY:
+        return None
+    rgb = image.convert("RGB")
+    tensor = IMG_TRANSFORM(rgb).unsqueeze(0)  # (1,3,224,224)
+
+    activations: list[torch.Tensor] = []
+    gradients: list[torch.Tensor] = []
+
+    target_layer = _model.features[-1]
+
+    def _save_activation(_, __, output):
+        activations.append(output.detach())
+
+    def _save_gradient(_, __, grad_output):
+        gradients.append(grad_output[0].detach())
+
+    # Lock prevents concurrent calls from corrupting each other's hooks/gradients
+    with _heatmap_lock:
+        fwd_hook = target_layer.register_forward_hook(_save_activation)
+        try:
+            bwd_hook = target_layer.register_full_backward_hook(_save_gradient)
+            try:
+                _model.eval()
+                logits = _model(tensor)
+                pso_idx = _class_names.index("psoriasis")
+                _model.zero_grad()
+                logits[0, pso_idx].backward()
+            finally:
+                bwd_hook.remove()
+        finally:
+            fwd_hook.remove()
+
+    # Global-average-pool the gradients to get per-channel weights
+    weights = gradients[0].mean(dim=(2, 3), keepdim=True)  # (1,C,1,1)
+    cam = (weights * activations[0]).sum(dim=1).squeeze(0)  # (H,W)
+    cam = torch.relu(cam).numpy()
+    if cam.max() > 0:
+        cam = cam / cam.max()
+
+    # Resize CAM to original image size and apply JET colormap (pure PIL/numpy)
+    w, h = rgb.size
+    cam_pil = Image.fromarray(np.uint8(255 * cam)).resize((w, h), Image.BILINEAR)
+    cam_arr = np.array(cam_pil, dtype=np.float32) / 255.0  # [0,1]
+
+    # JET colormap: blue→cyan→green→yellow→red
+    r = np.clip(1.5 - np.abs(4.0 * cam_arr - 3.0), 0, 1)
+    g = np.clip(1.5 - np.abs(4.0 * cam_arr - 2.0), 0, 1)
+    b = np.clip(1.5 - np.abs(4.0 * cam_arr - 1.0), 0, 1)
+    heatmap = np.stack([r, g, b], axis=-1)  # (H,W,3) float [0,1]
+
+    orig_arr = np.array(rgb, dtype=np.float32) / 255.0
+    blend = 0.55 * orig_arr + 0.45 * heatmap
+    return Image.fromarray(np.uint8(255 * blend.clip(0, 1)))
 
 
 def analyze_skin_lesion(image: Image.Image) -> dict:
@@ -108,7 +170,9 @@ def _format_result(result: dict) -> str:
 
 
 def gradio_analyze(image):
-    return _format_result(analyze_skin_lesion(image))
+    result_md = _format_result(analyze_skin_lesion(image))
+    heatmap = _generate_heatmap(image) if image is not None else None
+    return result_md, heatmap
 
 
 with gr.Blocks(title="DermAI — Detector de Psoriase", theme=gr.themes.Soft()) as demo:
@@ -128,8 +192,13 @@ with gr.Blocks(title="DermAI — Detector de Psoriase", theme=gr.themes.Soft()) 
             btn = gr.Button("Analisar", variant="primary", size="lg")
         with gr.Column(scale=1):
             output = gr.Markdown(label="Resultado")
+            heatmap_output = gr.Image(
+                type="pil",
+                label="Zona suspeita (Grad-CAM)",
+                visible=True,
+            )
 
-    btn.click(gradio_analyze, inputs=img_input, outputs=output)
+    btn.click(gradio_analyze, inputs=img_input, outputs=[output, heatmap_output])
 
     gr.Markdown("---")
     gr.Markdown(
